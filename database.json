@@ -1,0 +1,17 @@
+{
+  "questions": [
+    {
+      "question": "hi",
+      "answers": [
+        "Hello",
+        "Hi"
+      ]
+    },
+    {
+      "question": "clear",
+      "answers": [
+        "I am not a FUCKING terminal."
+      ]
+    }
+  ]
+}
