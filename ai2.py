@@ -24,7 +24,7 @@ BOT_NAME = "Lupey"
 EXIT_COMMANDS = {"quit", "exit", "bye"}
 
 FUZZY_MATCH_THRESHOLD = 0.72
-MAX_HISTORY = 15
+MAX_HISTORY = 20
 
 logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
 
@@ -56,19 +56,13 @@ class SmartChatBot:
     # ========================================================
 
     def _load_database(self) -> dict[str, Any]:
-        if not self.database_path.exists():
+        if not self.database_path.exists() or self.database_path.stat().st_size == 0:
             return {"questions": []}
-
         try:
-            if self.database_path.stat().st_size == 0:
-                return {"questions": []}
-
             with self.database_path.open("r", encoding="utf-8") as f:
                 data = json.load(f)
-
             data.setdefault("questions", [])
             return data
-
         except Exception as e:
             logging.error(f"DB load error: {e}")
             return {"questions": []}
@@ -87,7 +81,7 @@ class SmartChatBot:
     @staticmethod
     def normalize_text(text: str) -> str:
         text = text.lower().strip()
-        text = re.sub(r"[^\w\s]", " ", text)
+        text = re.sub(r"[^\w\s]", "", text)
         text = re.sub(r"\s+", " ", text)
         return text
 
@@ -96,91 +90,63 @@ class SmartChatBot:
         return SequenceMatcher(None, a, b).ratio()
 
     # ========================================================
-    # 🧠 COMMON SENSE INTENT SYSTEM (NEW)
+    # INTENT CLASSIFIER
     # ========================================================
 
-    def intent_score(self, text: str) -> dict:
+    def classify_intent(self, user_input: str) -> str:
+        text = self.normalize_text(user_input)
 
-        chat_keywords = [
+        chat_phrases = [
             "hi", "hello", "hey",
             "how are you", "whats up",
             "who are you", "what is your name",
             "thanks", "bye"
         ]
-
-        chat_score = sum(1 for k in chat_keywords if k in text)
-
-        question_words = ("what ", "why ", "how ", "when ", "where ", "who ")
-
-        web_score = 1 if text.startswith(question_words) else 0
-
-        return {
-            "chat": chat_score,
-            "web": web_score
-        }
-
-    def classify_intent(self, user_input: str) -> str:
-
-        text = self.normalize_text(user_input)
-        score = self.intent_score(text)
-
-        # 🟢 strongest rule: direct chat wins
-        if score["chat"] > 0:
+        if any(p in text for p in chat_phrases):
             return "chat"
 
-        # 🟡 only real informational queries go web
-        if score["web"] == 1 and len(text.split()) > 3:
+        if text.startswith(("what ", "why ", "how ", "when ", "where ", "who ")):
             return "web"
 
         return "memory"
 
     # ========================================================
-    # CHAT RESPONSE
+    # CHAT RESPONSES
     # ========================================================
 
     def chat_response(self, user_input: str) -> str:
-
         text = self.normalize_text(user_input)
 
         chat_map = {
-            "hi": ["Hello!", "Hi!", "Hey!"],
+            "hi": ["Hi!", "Hello!", "Hey!"],
             "hello": ["Hello!", "Hey there!"],
             "hey": ["Hey!", "Hi!"],
-
-            "how are you": ["I'm doing great.", "All good here.", "I'm fine!"],
+            "how are you": ["I'm good, thanks!", "All well here.", "Doing fine!"],
             "whats up": ["Not much, just learning.", "All good!"],
-            "who are you": [f"I'm {BOT_NAME}.", f"I'm {BOT_NAME}, your chatbot."],
+            "who are you": [f"I'm {BOT_NAME}, your chatbot."],
             "what is your name": [f"My name is {BOT_NAME}."],
             "thanks": ["You're welcome!", "No problem!"],
             "bye": ["Goodbye!", "See you later!"]
         }
 
         for k, v in chat_map.items():
-            if self.similarity(text, k) > 0.75:
+            if self.similarity(text, k) > 0.8:
                 return random.choice(v)
 
-        return "I'm not sure how to respond."
+        return "I'm not sure yet."
 
     # ========================================================
     # MEMORY MATCHING
     # ========================================================
 
     def find_best_match(self, user_input: str):
-
         norm = self.normalize_text(user_input)
-
         best, best_score = None, 0
-
         for entry in self.database["questions"]:
-
             q = self.normalize_text(entry["question"])
-
-            score = self.similarity(norm, q)
-            score += len(set(norm.split()) & set(q.split())) * 0.05
-
+            score = self.similarity(norm, q) + len(set(norm.split()) & set(q.split())) * 0.05
             if score > best_score:
                 best, best_score = entry, score
-
         return best if best_score >= FUZZY_MATCH_THRESHOLD else None
 
     # ========================================================
@@ -188,38 +154,30 @@ class SmartChatBot:
     # ========================================================
 
     def learn(self, q: str, a: str, source="user"):
-
         q, a = self.normalize_text(q), a.strip()
-
-        if len(a.split()) < 4:
+        if len(a) < 3:
             return
-
         for entry in self.database["questions"]:
             if self.normalize_text(entry["question"]) == q:
-
-                if a.lower() in (x.lower() for x in entry["answers"]):
+                if any(a.lower() == x.lower() for x in entry["answers"]):
                     return
-
                 entry["answers"].append(a)
                 entry["source"] = source
                 self._save_database()
                 return
-
         self.database["questions"].append(asdict(QuestionEntry(
             question=q,
             answers=[a],
             created_at=time.time(),
             source=source
         )))
-
         self._save_database()
 
     # ========================================================
-    # WEB SEARCH (LAST RESORT ONLY)
+    # WEB SEARCH + SMART FILTER
     # ========================================================
 
     def search_web(self, query: str) -> str | None:
-
         try:
             r = requests.get(
                 "https://duckduckgo.com/html/",
@@ -227,37 +185,31 @@ class SmartChatBot:
                 timeout=10,
                 headers={"User-Agent": "Mozilla/5.0"}
             )
-
             soup = BeautifulSoup(r.text, "html.parser")
             results = soup.select(".result__snippet")
 
             for item in results:
-
                 text = re.sub(r"\s+", " ", item.get_text(strip=True))
-                t = text.lower()
-
-                bad_patterns = (
-                    "definition", "dictionary", "grammar",
-                    "noun", "verb", "pronoun",
-                    "means", "learn more", "in english"
-                )
-
-                if any(b in t for b in bad_patterns):
+                # skip definitions, translations, long stories
+                bad_keywords = ("definition:", "dictionary", "pronunciation", "translation", "learn more")
+                if any(b in text.lower() for b in bad_keywords):
                     continue
-
-                if len(text.split()) < 15:
+                # skip very long snippets (>25 words)
+                if len(text.split()) > 25:
                     continue
-
-                return text
-
+                # skip snippets that are questions
+                if text.endswith("?"):
+                    continue
+                # prioritize short human-like sentences
+                if 5 <= len(text.split()) <= 25:
+                    return text
             return None
-
         except Exception as e:
             logging.error(f"Web error: {e}")
             return None
 
     # ========================================================
-    # MEMORY
+    # MEMORY HISTORY
     # ========================================================
 
     def remember(self, u, b):
@@ -266,42 +218,30 @@ class SmartChatBot:
             self.history.pop(0)
 
     # ========================================================
-    # 🧠 COMMON SENSE FALLBACK
+    # FALLBACK
     # ========================================================
 
     def memory_fallback(self):
-
         if not self.history:
-            return "I’m still learning. Can you explain that a bit more?"
-
-        last_user = self.history[-1][0]
-
-        return f"I’m not fully sure yet. When you asked '{last_user}', what exactly did you mean?"
+            return random.choice(["Interesting.", "Tell me more.", "I'm still learning."])
+        last_topic = self.history[-1][0]
+        return f"Tell me more about '{last_topic}'."
 
     # ========================================================
-    # MAIN BRAIN (SMART ROUTER)
+    # MAIN BRAIN
     # ========================================================
 
     def generate_smart_response(self, user_input: str) -> str:
-
         intent = self.classify_intent(user_input)
-
-        # 1. CHAT ALWAYS FIRST
         if intent == "chat":
             return self.chat_response(user_input)
-
-        # 2. MEMORY SECOND
         match = self.find_best_match(user_input)
         if match:
             return random.choice(match["answers"])
-
-        # 3. WEB LAST RESORT (true common sense)
-        web = self.search_web(user_input)
-        if web:
-            self.learn(user_input, web, "web")
-            return web
-
-        # 4. FALLBACK
+        web_result = self.search_web(user_input)
+        if web_result:
+            self.learn(user_input, web_result, "web")
+            return web_result
         return self.memory_fallback()
 
     # ========================================================
@@ -309,28 +249,21 @@ class SmartChatBot:
     # ========================================================
 
     def run(self):
-
         print("=" * 50)
-        print(f"{BOT_NAME} AI Bot (COMMON SENSE MODE)")
+        print(f"{BOT_NAME} SELF-BUILDING BOT")
         print("=" * 50)
-
         while True:
-
             user = input("\nYou: ").strip()
             if not user:
                 continue
-
             if user.lower() in EXIT_COMMANDS:
                 print(f"{BOT_NAME}: Goodbye.")
                 break
-
             response = self.generate_smart_response(user)
-
             print(f"\n{BOT_NAME}: {response}")
-
             self.remember(user, response)
-
-            if input("\nGood response? (y/n/skip): ").strip() == "n":
+            feedback = input("\nGood response? (y/n/skip): ").strip().lower()
+            if feedback == "n":
                 better = input("Teach better response: ").strip()
                 if better:
                     self.learn(user, better, "user")
@@ -342,7 +275,6 @@ class SmartChatBot:
 
 def main():
     SmartChatBot(DATABASE_FILE).run()
-
 
 if __name__ == "__main__":
     main()
